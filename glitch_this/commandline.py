@@ -54,8 +54,7 @@ def is_latest(version: str) -> bool:
 def get_help(glitch_min: float, glitch_max: float) -> Dict:
     help_text = dict()
     help_text['path'] = 'Relative or Absolute string path to source image'
-    help_text['level'] = f'Number between {glitch_min} and {
-        glitch_max}, inclusive, representing amount of glitchiness'
+    help_text['level'] = f'Number between {glitch_min} and {glitch_max}, inclusive, representing amount of glitchiness'
     help_text['color'] = 'Include if you want to add color offset'
     help_text['scan'] = 'Include if you want to add scan lines effect\nDefaults to False'
     help_text['seed'] = 'Set a random seed for generating similar images across runs'
@@ -63,8 +62,7 @@ def get_help(glitch_min: float, glitch_max: float) -> Dict:
     help_text['frames'] = 'Number of frames to include in output GIF, default - 23'
     help_text['step'] = 'Glitch every step\'th frame of output GIF, default - 1 (every frame)'
     help_text['increment'] = 'Increment glitch_amount by given value after glitching every frame of output GIF'
-    help_text['cycle'] = f'Include if glitch_amount should be cycled back to {
-        glitch_min} or {glitch_max} if it over/underflows'
+    help_text['cycle'] = f'Include if glitch_amount should be cycled back to {glitch_min} or {glitch_max} if it over/underflows'
     help_text['duration'] = 'How long to display each frame (in centiseconds), default - 200'
     help_text['relative_duration'] = 'Multiply given value to input GIF\'s original duration and use that as duration'
     help_text['loop'] = 'How many times the glitched GIF should loop, default - 0 (infinite loop)'
@@ -72,6 +70,12 @@ def get_help(glitch_min: float, glitch_max: float) -> Dict:
     help_text['force'] = 'Forcefully overwrite output file'
     help_text['out'] = 'Explcitly supply full/relative path to output file'
     help_text["output_frames"] = "Output individual frames of the glitched GIF as separate images"
+    help_text['second_image'] = 'Path to second image for swap/alternate mode'
+    help_text['swap'] = 'Enable swap mode: alternate between two images'
+    help_text['swap_interval'] = 'Swap interval in frames, default - 1 (alternate every frame)'
+    help_text['depth'] = 'Depth of field blur intensity (0=off, 1-25 recommended)'
+    help_text['dof_x'] = 'Depth of field center X position (0.0-1.0), default 0.5'
+    help_text['dof_y'] = 'Depth of field center Y position (0.0-1.0), default 0.5'
 
     return help_text
 
@@ -122,6 +126,18 @@ def main():
                            help=help_text['out'])
     argparser.add_argument("-of", "--output-frames", dest="output_frames",
                            action="store_true", help=help_text["output_frames"])
+    argparser.add_argument('-s2', '--second-image', dest='second_image', metavar='Second_Image_Path', type=str,
+                           help=help_text['second_image'])
+    argparser.add_argument('-sw', '--swap', dest='swap', action='store_true',
+                           help=help_text['swap'])
+    argparser.add_argument('-si', '--swap-interval', dest='swap_interval', metavar='Swap_Interval', type=int, default=1,
+                           help=help_text['swap_interval'])
+    argparser.add_argument('-dof', '--depth', dest='depth', metavar='Depth', type=int, default=0,
+                           help=help_text['depth'])
+    argparser.add_argument('-dofx', '--dof-x', dest='dof_x', metavar='DOF_X', type=float, default=0.5,
+                           help=help_text['dof_x'])
+    argparser.add_argument('-dofy', '--dof-y', dest='dof_y', metavar='DOF_Y', type=float, default=0.5,
+                           help=help_text['dof_y'])
     args = argparser.parse_args()
 
     # Sanity check inputs
@@ -135,6 +151,20 @@ def main():
         raise FileNotFoundError('No image found at given path')
     if args.output_frames and not args.gif:
         raise ValueError("Cannot output frames without GIF output enabled")
+    if args.swap and not args.second_image:
+        raise ValueError("Swap mode requires a second image (-s2/--second-image)")
+    if args.swap and not args.gif:
+        raise ValueError("Swap mode requires GIF output (-g/--gif)")
+    if args.swap_interval < 1:
+        raise ValueError("Swap interval must be at least 1")
+    if args.second_image and not os.path.isfile(args.second_image):
+        raise FileNotFoundError('No image found at second image path')
+    if args.depth < 0 or args.depth > 50:
+        raise ValueError("Depth of field must be between 0 and 50")
+    if not 0.0 <= args.dof_x <= 1.0:
+        raise ValueError("Depth of field center X must be between 0.0 and 1.0")
+    if not 0.0 <= args.dof_y <= 1.0:
+        raise ValueError("Depth of field center Y must be between 0.0 and 1.0")
 
     # Set up full_path, for output saving location
     out_path, out_file = os.path.split(Path(args.src_img_path))
@@ -167,23 +197,60 @@ def main():
             frame_path = os.path.join(
                 out_path, (f"{out_filename}_{i}.{out_fileex}"))
             if os.path.exists(frame_path) and not args.force:
-                raise Exception(
-                    frame_path + " already exists\nCannot overwrite "
-                    "existing file unless -f or --force is included\nProgram Aborted"
-                )
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                out_filename = f"{out_filename}_{timestamp}"
+                break
     else:
         if os.path.exists(full_path) and not args.force:
-            raise Exception(
-                full_path + " already exists\nCannot overwrite "
-                "existing file unless -f or --force is included\nProgram Aborted"
-            )
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_filename = f"{out_filename}_{timestamp}"
+            full_path = os.path.join(out_path, f"{out_filename}.{out_fileex}")
 
     # Actual work begins here
     glitcher = ImageGlitcher()
     global version_filepath
     version_filepath = os.path.join(glitcher.lib_path, 'version.info')
     t0 = time()
-    if not args.input_gif:
+
+    if args.swap:
+        # Swap mode: glitch both images and interleave frames
+        glitch_img1 = glitcher.glitch_image(args.src_img_path, args.glitch_level,
+                                            glitch_change=args.increment,
+                                            cycle=args.cycle,
+                                            scan_lines=args.scan_lines,
+                                            color_offset=args.color,
+                                            seed=args.seed,
+                                            gif=True,
+                                            frames=args.frames,
+                                            step=args.step,
+                                            depth_of_field=args.depth,
+                                            dof_center_x=args.dof_x,
+                                            dof_center_y=args.dof_y)
+        glitch_img2 = glitcher.glitch_image(args.second_image, args.glitch_level,
+                                            glitch_change=args.increment,
+                                            cycle=args.cycle,
+                                            scan_lines=args.scan_lines,
+                                            color_offset=args.color,
+                                            seed=args.seed,
+                                            gif=True,
+                                            frames=args.frames,
+                                            step=args.step,
+                                            depth_of_field=args.depth,
+                                            dof_center_x=args.dof_x,
+                                            dof_center_y=args.dof_y)
+        # Interleave frames from both images
+        swap_interval = args.swap_interval
+        glitch_img = []
+        frames1 = list(glitch_img1)
+        frames2 = list(glitch_img2)
+        total_frames = max(len(frames1), len(frames2))
+        for i in range(total_frames):
+            if i % (swap_interval + 1) < swap_interval:
+                glitch_img.append(frames1[i % len(frames1)])
+            else:
+                glitch_img.append(frames2[i % len(frames2)])
+        args.gif = True
+    elif not args.input_gif:
         # Get glitched image or GIF (from image)
         glitch_img = glitcher.glitch_image(args.src_img_path, args.glitch_level,
                                            glitch_change=args.increment,
@@ -193,7 +260,10 @@ def main():
                                            seed=args.seed,
                                            gif=args.gif,
                                            frames=args.frames,
-                                           step=args.step)
+                                           step=args.step,
+                                           depth_of_field=args.depth,
+                                           dof_center_x=args.dof_x,
+                                           dof_center_y=args.dof_y)
     else:
         # Get glitched image or GIF (from GIF)
         glitch_img, src_duration, args.frames = glitcher.glitch_gif(args.src_img_path, args.glitch_level,
@@ -227,10 +297,14 @@ def main():
             compress_level=3,
         )
         t3 = time()
-        print(
-            f'Glitched GIF saved in "{full_path}"\nFrames = {
-                args.frames}, Duration = {args.duration}, Loop = {args.loop}'
-        )
+        if args.swap:
+            print(
+                f'Swapped Glitched GIF saved in "{full_path}"\nFrames = {len(glitch_img)}, Duration = {args.duration}, Loop = {args.loop}'
+            )
+        else:
+            print(
+                f'Glitched GIF saved in "{full_path}"\nFrames = {args.frames}, Duration = {args.duration}, Loop = {args.loop}'
+            )
     else:
         for i, frame in enumerate(glitch_img):
             frame_path = os.path.join(

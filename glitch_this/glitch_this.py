@@ -5,7 +5,7 @@ from decimal import Decimal, getcontext
 from typing import List, Literal, Optional, Tuple, Union, overload
 
 import numpy as np
-from PIL import Image, ImageSequence
+from PIL import Image, ImageFilter, ImageSequence
 
 
 class ImageGlitcher:
@@ -109,16 +109,19 @@ class ImageGlitcher:
 
     @overload
     def glitch_image(self, src_img: Union[str, Image.Image], glitch_amount: Union[int, float], seed: Optional[Union[int, float]] = None, glitch_change: Union[int, float] = 0.0,
-                     color_offset: bool = False, scan_lines: bool = False, gif: Literal[False] = False, cycle: bool = False, frames: int = 23, step: int = 1) -> Image.Image:
+                     color_offset: bool = False, scan_lines: bool = False, gif: Literal[False] = False, cycle: bool = False, frames: int = 23, step: int = 1,
+                     depth_of_field: int = 0, dof_center_x: float = 0.5, dof_center_y: float = 0.5) -> Image.Image:
         ...
 
     @overload
     def glitch_image(self, src_img: Union[str, Image.Image], glitch_amount: Union[int, float], seed: Optional[Union[int, float]] = None, glitch_change: Union[int, float] = 0.0,
-                     color_offset: bool = False, scan_lines: bool = False, gif: Literal[True] = False, cycle: bool = False, frames: int = 23, step: int = 1) -> List[Image.Image]: # type: ignore
+                     color_offset: bool = False, scan_lines: bool = False, gif: Literal[True] = False, cycle: bool = False, frames: int = 23, step: int = 1,
+                     depth_of_field: int = 0, dof_center_x: float = 0.5, dof_center_y: float = 0.5) -> List[Image.Image]: # type: ignore
         ...
 
     def glitch_image(self, src_img: Union[str, Image.Image], glitch_amount: Union[int, float], seed: Optional[Union[int, float]] = None, glitch_change: Union[int, float] = 0.0,
-                     color_offset: bool = False, scan_lines: bool = False, gif: bool = False, cycle: bool = False, frames: int = 23, step: int = 1) -> Union[Image.Image, List[Image.Image]]:
+                     color_offset: bool = False, scan_lines: bool = False, gif: bool = False, cycle: bool = False, frames: int = 23, step: int = 1,
+                     depth_of_field: int = 0, dof_center_x: float = 0.5, dof_center_y: float = 0.5) -> Union[Image.Image, List[Image.Image]]:
         """
          Sets up values needed for glitching the image
 
@@ -149,6 +152,12 @@ class ImageGlitcher:
 
          seed: Set a random seed for generating similar images across runs,
                defaults to None (random seed).
+
+         depth_of_field: Blur radius for depth of field effect (0 = disabled, 1-25 recommended)
+
+         dof_center_x: Center X position for depth of field (0.0 to 1.0)
+
+         dof_center_y: Center Y position for depth of field (0.0 to 1.0)
         """
 
         # Sanity checking the inputs
@@ -209,7 +218,7 @@ class ImageGlitcher:
         # Glitching begins here
         if not gif:
             # Return glitched image
-            return self.__get_glitched_img(glitch_amount, color_offset, scan_lines)
+            return self.__get_glitched_img(glitch_amount, color_offset, scan_lines, depth_of_field, dof_center_x, dof_center_y)
 
         # Return glitched GIF
         # Set up directory for storing glitched images
@@ -235,7 +244,7 @@ class ImageGlitcher:
                 glitched_imgs.append(img.copy())
                 continue
             glitched_img = self.__get_glitched_img(
-                glitch_amount, color_offset, scan_lines)
+                glitch_amount, color_offset, scan_lines, depth_of_field, dof_center_x, dof_center_y)
             file_path = os.path.join(self.gif_dirpath, 'glitched_frame.png')
             glitched_img.save(file_path, compress_level=3)
             glitched_imgs.append(Image.open(file_path).copy())
@@ -386,7 +395,8 @@ class ImageGlitcher:
                 self.glitch_max)) if cycle else self.glitch_max
         return glitch_amount
 
-    def __get_glitched_img(self, glitch_amount: Union[int, float], color_offset: int, scan_lines: bool) -> Image.Image:
+    def __get_glitched_img(self, glitch_amount: Union[int, float], color_offset: int, scan_lines: bool,
+                           depth_of_field: int = 0, dof_center_x: float = 0.5, dof_center_y: float = 0.5) -> Image.Image:
         """
          Glitches the image located at given path
          Intensity of glitch depends on glitch_amount
@@ -437,6 +447,10 @@ class ImageGlitcher:
             # Add scan lines if checked true
             self.__add_scan_lines()
 
+        if depth_of_field > 0:
+            # Add depth of field effect if enabled
+            self.__add_depth_of_field(dof_center_x, dof_center_y, depth_of_field)
+
         # Creating glitched image from output array
         return Image.fromarray(self.outputarr, self.img_mode)
 
@@ -445,6 +459,46 @@ class ImageGlitcher:
         # Only the R, G, and B channels are assigned 0 values
         # Alpha is left untouched (if present)
         self.outputarr[::2, :, :3] = [0, 0, 0]
+
+    def __add_depth_of_field(self, center_x: float, center_y: float, blur_radius: int):
+        """
+        Adds depth of field effect - blurs edges while keeping center sharp
+        center_x: Center X position (0.0 to 1.0, where 0.5 is middle)
+        center_y: Center Y position (0.0 to 1.0, where 0.5 is middle)
+        blur_radius: Blur intensity (1-25 recommended)
+        """
+        if blur_radius < 1:
+            return
+
+        # Create blurred version
+        img = Image.fromarray(self.outputarr, self.img_mode)
+        blurred = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+        # Convert to arrays
+        blurred_arr = np.array(blurred)
+
+        # Create a mask based on distance from center
+        height, width = self.outputarr.shape[:2]
+        cx, cy = int(center_x * width), int(center_y * height)
+
+        # Create coordinate grids
+        y_coords, x_coords = np.ogrid[:height, :width]
+
+        # Calculate distance from center (elliptical)
+        dx = (x_coords - cx) / (width / 2)
+        dy = (y_coords - cy) / (height / 2)
+        distance = np.sqrt(dx**2 + dy**2)
+
+        # Create soft edge mask (1 = sharp, 0 = blurred)
+        # Transition zone between 0.3 and 0.7 of the image
+        mask = np.clip((0.7 - distance) / 0.4, 0, 1)
+
+        # Expand mask to match channel dimensions
+        if len(self.outputarr.shape) == 3:
+            mask = mask[:, :, np.newaxis]
+
+        # Blend original and blurred
+        self.outputarr = (self.outputarr * mask + blurred_arr * (1 - mask)).astype(self.outputarr.dtype)
 
     def __glitch_left(self, offset: int):
         """
